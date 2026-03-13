@@ -1,7 +1,8 @@
 import os
 import sqlite3
 import logging
-from typing import Optional, Dict, Tuple
+from collections import defaultdict
+from typing import Optional, Dict, Tuple, List, Any
 
 import requests
 from telegram import Update
@@ -17,10 +18,9 @@ from telegram.ext import (
 TG_BOT_TOKEN = "8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0"
 FACEIT_API_KEY = "6dc92495-d0e2-45f1-a658-d52b02229bfb"
 
-
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
-DB_PATH = "trackers.db"
+DB_PATH = "faceit_bot.db"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -29,8 +29,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # chat_id -> {
-#   "player_id1": {"nickname": "...", "last_match_id": "...", "active_match_id": "..."},
-#   "player_id2": {...}
+#   player_id: {
+#       "nickname": str,
+#       "last_match_id": str,
+#       "active_match_id": str,
+#       "last_known_elo": str
+#   }
 # }
 TRACKED_PLAYERS: Dict[int, Dict[str, Dict[str, str]]] = {}
 
@@ -38,9 +42,14 @@ TRACKED_PLAYERS: Dict[int, Dict[str, Dict[str, str]]] = {}
 # =========================
 # DATABASE
 # =========================
+def get_db_connection():
+    return sqlite3.connect(DB_PATH)
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tracked_players (
             chat_id INTEGER NOT NULL,
@@ -48,9 +57,20 @@ def init_db():
             nickname TEXT NOT NULL,
             last_match_id TEXT DEFAULT '',
             active_match_id TEXT DEFAULT '',
+            last_known_elo TEXT DEFAULT '',
             PRIMARY KEY (chat_id, player_id)
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            chat_id INTEGER NOT NULL,
+            player_id TEXT NOT NULL,
+            nickname TEXT NOT NULL,
+            PRIMARY KEY (chat_id, player_id)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -59,16 +79,16 @@ def load_tracked_players_from_db():
     global TRACKED_PLAYERS
     TRACKED_PLAYERS = {}
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT chat_id, player_id, nickname, last_match_id, active_match_id
+        SELECT chat_id, player_id, nickname, last_match_id, active_match_id, last_known_elo
         FROM tracked_players
     """)
     rows = cur.fetchall()
     conn.close()
 
-    for chat_id, player_id, nickname, last_match_id, active_match_id in rows:
+    for chat_id, player_id, nickname, last_match_id, active_match_id, last_known_elo in rows:
         if chat_id not in TRACKED_PLAYERS:
             TRACKED_PLAYERS[chat_id] = {}
 
@@ -76,50 +96,72 @@ def load_tracked_players_from_db():
             "nickname": nickname,
             "last_match_id": last_match_id or "",
             "active_match_id": active_match_id or "",
+            "last_known_elo": last_known_elo or "",
         }
 
 
-def save_tracked_player(chat_id: int, player_id: str, nickname: str, last_match_id: str = "", active_match_id: str = ""):
-    conn = sqlite3.connect(DB_PATH)
+def save_tracked_player(
+    chat_id: int,
+    player_id: str,
+    nickname: str,
+    last_match_id: str = "",
+    active_match_id: str = "",
+    last_known_elo: str = "",
+):
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
         INSERT OR REPLACE INTO tracked_players
-        (chat_id, player_id, nickname, last_match_id, active_match_id)
-        VALUES (?, ?, ?, ?, ?)
-    """, (chat_id, player_id, nickname, last_match_id, active_match_id))
+        (chat_id, player_id, nickname, last_match_id, active_match_id, last_known_elo)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (chat_id, player_id, nickname, last_match_id, active_match_id, last_known_elo))
     conn.commit()
     conn.close()
 
 
-def update_tracked_player_state(chat_id: int, player_id: str, last_match_id: Optional[str] = None, active_match_id: Optional[str] = None):
-    conn = sqlite3.connect(DB_PATH)
+def update_tracked_player_state(
+    chat_id: int,
+    player_id: str,
+    last_match_id: Optional[str] = None,
+    active_match_id: Optional[str] = None,
+    last_known_elo: Optional[str] = None,
+):
+    conn = get_db_connection()
     cur = conn.cursor()
 
-    if last_match_id is not None and active_match_id is not None:
-        cur.execute("""
-            UPDATE tracked_players
-            SET last_match_id = ?, active_match_id = ?
-            WHERE chat_id = ? AND player_id = ?
-        """, (last_match_id, active_match_id, chat_id, player_id))
-    elif last_match_id is not None:
-        cur.execute("""
-            UPDATE tracked_players
-            SET last_match_id = ?
-            WHERE chat_id = ? AND player_id = ?
-        """, (last_match_id, chat_id, player_id))
-    elif active_match_id is not None:
-        cur.execute("""
-            UPDATE tracked_players
-            SET active_match_id = ?
-            WHERE chat_id = ? AND player_id = ?
-        """, (active_match_id, chat_id, player_id))
+    fields = []
+    values = []
+
+    if last_match_id is not None:
+        fields.append("last_match_id = ?")
+        values.append(last_match_id)
+
+    if active_match_id is not None:
+        fields.append("active_match_id = ?")
+        values.append(active_match_id)
+
+    if last_known_elo is not None:
+        fields.append("last_known_elo = ?")
+        values.append(last_known_elo)
+
+    if not fields:
+        conn.close()
+        return
+
+    values.extend([chat_id, player_id])
+
+    cur.execute(f"""
+        UPDATE tracked_players
+        SET {", ".join(fields)}
+        WHERE chat_id = ? AND player_id = ?
+    """, values)
 
     conn.commit()
     conn.close()
 
 
 def delete_tracked_player(chat_id: int, player_id: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
         DELETE FROM tracked_players
@@ -130,7 +172,7 @@ def delete_tracked_player(chat_id: int, player_id: str):
 
 
 def clear_tracked_players(chat_id: int):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
         DELETE FROM tracked_players
@@ -138,6 +180,42 @@ def clear_tracked_players(chat_id: int):
     """, (chat_id,))
     conn.commit()
     conn.close()
+
+
+def add_favorite(chat_id: int, player_id: str, nickname: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR REPLACE INTO favorites (chat_id, player_id, nickname)
+        VALUES (?, ?, ?)
+    """, (chat_id, player_id, nickname))
+    conn.commit()
+    conn.close()
+
+
+def remove_favorite(chat_id: int, player_id: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM favorites
+        WHERE chat_id = ? AND player_id = ?
+    """, (chat_id, player_id))
+    conn.commit()
+    conn.close()
+
+
+def get_favorites(chat_id: int) -> List[Tuple[str, str]]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT player_id, nickname
+        FROM favorites
+        WHERE chat_id = ?
+        ORDER BY nickname COLLATE NOCASE
+    """, (chat_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 # =========================
@@ -259,6 +337,20 @@ def format_percent(value) -> str:
     return text if text.endswith("%") else f"{text}%"
 
 
+def to_float(value, default=0.0) -> float:
+    try:
+        return float(str(value).replace("%", "").strip())
+    except Exception:
+        return default
+
+
+def to_int(value, default=0) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
 def get_lifetime_stats(stats_data: Optional[dict]) -> dict:
     lifetime = stats_data.get("lifetime", {}) if isinstance(stats_data, dict) else {}
     return {
@@ -363,6 +455,188 @@ def build_last5_text(details: dict, recent_data: Optional[dict], recent_error: O
     return text.strip()
 
 
+def calculate_form_stats(recent_data: Optional[dict]) -> dict:
+    items = recent_data.get("items", []) if isinstance(recent_data, dict) else []
+
+    if not items:
+        return {
+            "matches": 0,
+            "wins": 0,
+            "losses": 0,
+            "avg_kd": 0.0,
+            "avg_hs": 0.0,
+            "avg_kr": 0.0,
+            "avg_adr": 0.0,
+            "score": 0.0,
+        }
+
+    wins = 0
+    losses = 0
+    kd_sum = 0.0
+    hs_sum = 0.0
+    kr_sum = 0.0
+    adr_sum = 0.0
+
+    for item in items:
+        stats = item.get("stats", {})
+        result = parse_result(safe_get(stats, "Result"))
+        if result == "WIN":
+            wins += 1
+        elif result == "LOSS":
+            losses += 1
+
+        kd_sum += to_float(safe_get(stats, "K/D Ratio", 0))
+        hs_sum += to_float(safe_get(stats, "Headshots %", 0))
+        kr_sum += to_float(safe_get(stats, "K/R Ratio", 0))
+        adr_sum += to_float(safe_get(stats, "ADR", 0))
+
+    matches = len(items)
+    avg_kd = kd_sum / matches
+    avg_hs = hs_sum / matches
+    avg_kr = kr_sum / matches
+    avg_adr = adr_sum / matches
+
+    # можно менять формулу
+    score = (wins * 2.0) + avg_kd + (avg_hs / 100.0) + avg_kr
+
+    return {
+        "matches": matches,
+        "wins": wins,
+        "losses": losses,
+        "avg_kd": avg_kd,
+        "avg_hs": avg_hs,
+        "avg_kr": avg_kr,
+        "avg_adr": avg_adr,
+        "score": score,
+    }
+
+
+def build_form5_text(details: dict, recent_data: Optional[dict], recent_error: Optional[str]) -> str:
+    nickname = safe_get(details, "nickname")
+
+    if recent_error:
+        return f"Не удалось получить форму за 5 матчей для {nickname}.\n{recent_error}"
+
+    form = calculate_form_stats(recent_data)
+    if form["matches"] == 0:
+        return f"Нет данных по последним матчам для {nickname}."
+
+    return (
+        f"🔥 Форма {nickname} за последние {form['matches']} матчей\n\n"
+        f"✅ Wins: {form['wins']}\n"
+        f"❌ Losses: {form['losses']}\n"
+        f"🔫 Avg K/D: {form['avg_kd']:.2f}\n"
+        f"🎯 Avg HS: {form['avg_hs']:.1f}%\n"
+        f"⚡ Avg K/R: {form['avg_kr']:.2f}\n"
+        f"💥 Avg ADR: {form['avg_adr']:.1f}\n"
+        f"📈 Form score: {form['score']:.2f}"
+    )
+
+
+def build_compare_form_text(details1: dict, recent1: Optional[dict], details2: dict, recent2: Optional[dict]) -> str:
+    n1 = safe_get(details1, "nickname")
+    n2 = safe_get(details2, "nickname")
+
+    cs2_1 = get_cs2_data(details1)
+    cs2_2 = get_cs2_data(details2)
+
+    f1 = calculate_form_stats(recent1)
+    f2 = calculate_form_stats(recent2)
+
+    return (
+        f"⚔️ Сравнение формы за последние 5 матчей\n\n"
+        f"🎮 {n1} vs {n2}\n\n"
+        f"🏆 ELO: {safe_get(cs2_1, 'faceit_elo')} vs {safe_get(cs2_2, 'faceit_elo')}\n"
+        f"⭐ Level: {safe_get(cs2_1, 'skill_level')} vs {safe_get(cs2_2, 'skill_level')}\n"
+        f"✅ Wins: {f1['wins']} vs {f2['wins']}\n"
+        f"❌ Losses: {f1['losses']} vs {f2['losses']}\n"
+        f"🔫 Avg K/D: {f1['avg_kd']:.2f} vs {f2['avg_kd']:.2f}\n"
+        f"🎯 Avg HS: {f1['avg_hs']:.1f}% vs {f2['avg_hs']:.1f}%\n"
+        f"⚡ Avg K/R: {f1['avg_kr']:.2f} vs {f2['avg_kr']:.2f}\n"
+        f"💥 Avg ADR: {f1['avg_adr']:.1f} vs {f2['avg_adr']:.1f}\n"
+        f"📈 Form score: {f1['score']:.2f} vs {f2['score']:.2f}"
+    )
+
+
+def build_maps30_text(details: dict, recent30: Optional[dict], recent_error: Optional[str]) -> str:
+    nickname = safe_get(details, "nickname")
+
+    if recent_error:
+        return f"Не удалось получить карты за 30 матчей для {nickname}.\n{recent_error}"
+
+    items = recent30.get("items", []) if isinstance(recent30, dict) else []
+    if not items:
+        return f"Нет данных по 30 матчам для {nickname}."
+
+    maps = defaultdict(lambda: {
+        "matches": 0,
+        "wins": 0,
+        "kd_sum": 0.0,
+        "hs_sum": 0.0,
+        "kr_sum": 0.0,
+        "adr_sum": 0.0,
+    })
+
+    for item in items:
+        stats = item.get("stats", {})
+        map_name = safe_get(stats, "Map", "Unknown")
+        result = parse_result(safe_get(stats, "Result"))
+        kd = to_float(safe_get(stats, "K/D Ratio", 0))
+        hs = to_float(safe_get(stats, "Headshots %", 0))
+        kr = to_float(safe_get(stats, "K/R Ratio", 0))
+        adr = to_float(safe_get(stats, "ADR", 0))
+
+        maps[map_name]["matches"] += 1
+        maps[map_name]["kd_sum"] += kd
+        maps[map_name]["hs_sum"] += hs
+        maps[map_name]["kr_sum"] += kr
+        maps[map_name]["adr_sum"] += adr
+        if result == "WIN":
+            maps[map_name]["wins"] += 1
+
+    ranked = []
+    for map_name, data in maps.items():
+        matches = data["matches"]
+        winrate = (data["wins"] / matches) * 100 if matches else 0.0
+        ranked.append({
+            "map": map_name,
+            "matches": matches,
+            "winrate": winrate,
+            "avg_kd": data["kd_sum"] / matches if matches else 0.0,
+            "avg_hs": data["hs_sum"] / matches if matches else 0.0,
+            "avg_kr": data["kr_sum"] / matches if matches else 0.0,
+            "avg_adr": data["adr_sum"] / matches if matches else 0.0,
+        })
+
+    ranked.sort(key=lambda x: (x["winrate"], x["avg_kd"], x["matches"]), reverse=True)
+
+    text = f"🗺 Лучшие карты {nickname} за последние {len(items)} матчей\n\n"
+    for row in ranked[:8]:
+        text += (
+            f"• {row['map']}\n"
+            f"  Matches: {row['matches']} | Winrate: {row['winrate']:.1f}%\n"
+            f"  Avg K/D: {row['avg_kd']:.2f} | Avg HS: {row['avg_hs']:.1f}%\n"
+            f"  Avg K/R: {row['avg_kr']:.2f} | Avg ADR: {row['avg_adr']:.1f}\n\n"
+        )
+
+    return text.strip()
+
+
+def format_elo_delta(old_elo: str, new_elo: str) -> str:
+    old_val = to_int(old_elo, 0)
+    new_val = to_int(new_elo, 0)
+    diff = new_val - old_val
+
+    if old_val == 0 and new_val == 0:
+        return "N/A"
+
+    if diff > 0:
+        return f"{old_val} → {new_val} (+{diff})"
+    if diff < 0:
+        return f"{old_val} → {new_val} ({diff})"
+    return f"{old_val} → {new_val} (0)"
+
+
 def format_match_found_message(nickname: str, match_id: str, match_details: Optional[dict]) -> str:
     if not isinstance(match_details, dict):
         return (
@@ -393,12 +667,19 @@ def format_match_found_message(nickname: str, match_id: str, match_details: Opti
     )
 
 
-def format_match_finished_message(nickname: str, match_id: str, recent_match_stats: Optional[dict]) -> str:
+def format_match_finished_message(
+    nickname: str,
+    match_id: str,
+    recent_match_stats: Optional[dict],
+    elo_before: str,
+    elo_after: str,
+) -> str:
     if not isinstance(recent_match_stats, dict):
         return (
             f"✅ Матч {nickname} завершён\n\n"
             f"🎮 Игрок: {nickname}\n"
             f"🆔 Match ID: {match_id}\n"
+            f"🏆 ELO: {format_elo_delta(elo_before, elo_after)}\n"
             f"📊 Подробная статистика не найдена."
         )
 
@@ -413,6 +694,7 @@ def format_match_finished_message(nickname: str, match_id: str, recent_match_sta
     score = stats.get("Final Score") or stats.get("Score") or "N/A"
 
     result_emoji = "🟢" if result == "WIN" else ("🔴" if result == "LOSS" else "⚪")
+    elo_text = format_elo_delta(elo_before, elo_after)
 
     return (
         f"{result_emoji} Матч {nickname} завершён\n\n"
@@ -423,7 +705,8 @@ def format_match_finished_message(nickname: str, match_id: str, recent_match_sta
         f"📈 Score: {score}\n"
         f"🔫 K/D: {kills}/{deaths} ({kd})\n"
         f"🎯 HS: {hs}\n"
-        f"⚡ K/R: {kr}"
+        f"⚡ K/R: {kr}\n"
+        f"🏆 ELO: {elo_text}"
     )
 
 
@@ -464,11 +747,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/faceit nickname — общая стата\n"
         "/last5 nickname — последние 5 матчей\n"
         "/elo nickname — elo / level / region\n"
+        "/form5 nickname — форма за 5 матчей\n"
+        "/compareform nick1 nick2 — сравнение формы\n"
+        "/maps30 nickname — лучшие карты за 30 матчей\n\n"
+        "/fav add nickname\n"
+        "/fav remove nickname\n"
+        "/fav list\n"
+        "/favelo\n"
+        "/favkd\n"
+        "/favform\n\n"
         "/trackfull nickname — добавить игрока в слежку\n"
         "/untrackfull nickname — убрать игрока из слежки\n"
         "/tracklist — список отслеживаемых игроков\n"
-        "/cleartrack — очистить весь список\n\n"
-        "После рестарта список подтянется из базы."
+        "/cleartrack — очистить слежку"
     )
     await update.message.reply_text(text)
 
@@ -528,6 +819,254 @@ async def elo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text)
 
 
+async def form5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Напиши так: /form5 nickname")
+        return
+
+    nickname = " ".join(context.args).strip()
+    msg = await update.message.reply_text("Считаю форму за 5 матчей...")
+
+    player_data, error = load_player_full(nickname, recent_limit=5)
+    if error:
+        await msg.edit_text(error)
+        return
+
+    text = build_form5_text(
+        player_data["details"],
+        player_data["recent"],
+        player_data["recent_error"],
+    )
+    await msg.edit_text(text)
+
+
+async def compareform_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Напиши так: /compareform nick1 nick2")
+        return
+
+    nick1 = context.args[0].strip()
+    nick2 = context.args[1].strip()
+
+    msg = await update.message.reply_text("Сравниваю форму игроков...")
+
+    p1, err1 = load_player_full(nick1, recent_limit=5)
+    if err1:
+        await msg.edit_text(f"Ошибка с первым игроком: {err1}")
+        return
+
+    p2, err2 = load_player_full(nick2, recent_limit=5)
+    if err2:
+        await msg.edit_text(f"Ошибка со вторым игроком: {err2}")
+        return
+
+    text = build_compare_form_text(
+        p1["details"], p1["recent"],
+        p2["details"], p2["recent"],
+    )
+    await msg.edit_text(text)
+
+
+async def maps30_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Напиши так: /maps30 nickname")
+        return
+
+    nickname = " ".join(context.args).strip()
+    msg = await update.message.reply_text("Собираю карты за 30 матчей...")
+
+    player_data, error = load_player_full(nickname, recent_limit=30)
+    if error:
+        await msg.edit_text(error)
+        return
+
+    text = build_maps30_text(
+        player_data["details"],
+        player_data["recent"],
+        player_data["recent_error"],
+    )
+    await msg.edit_text(text)
+
+
+async def fav_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Используй: /fav add nickname | /fav remove nickname | /fav list")
+        return
+
+    action = context.args[0].lower()
+    chat_id = update.effective_chat.id
+
+    if action == "list":
+        favorites = get_favorites(chat_id)
+        if not favorites:
+            await update.message.reply_text("Список фаворитов пуст.")
+            return
+
+        text = "⭐ Фавориты:\n\n"
+        for _, nickname in favorites:
+            text += f"• {nickname}\n"
+        await update.message.reply_text(text.strip())
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Напиши так: /fav add nickname или /fav remove nickname")
+        return
+
+    nickname = " ".join(context.args[1:]).strip()
+
+    if action == "add":
+        msg = await update.message.reply_text("Добавляю в фавориты...")
+        player_data, error = load_player_full(nickname, recent_limit=1)
+        if error:
+            await msg.edit_text(error)
+            return
+
+        player_id = player_data["player_id"]
+        found_nick = safe_get(player_data["details"], "nickname", nickname)
+        add_favorite(chat_id, player_id, found_nick)
+        await msg.edit_text(f"⭐ Добавил {found_nick} в фавориты.")
+        return
+
+    if action == "remove":
+        favorites = get_favorites(chat_id)
+        found_player_id = None
+        found_nick = None
+
+        for player_id, nick in favorites:
+            if nick.lower() == nickname.lower():
+                found_player_id = player_id
+                found_nick = nick
+                break
+
+        if not found_player_id:
+            await update.message.reply_text("Такого игрока нет в фаворитах.")
+            return
+
+        remove_favorite(chat_id, found_player_id)
+        await update.message.reply_text(f"🗑 Убрал {found_nick} из фаворитов.")
+        return
+
+    await update.message.reply_text("Используй: /fav add nickname | /fav remove nickname | /fav list")
+
+
+async def favelo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    favorites = get_favorites(chat_id)
+
+    if not favorites:
+        await update.message.reply_text("Список фаворитов пуст.")
+        return
+
+    msg = await update.message.reply_text("Сравниваю фаворитов по ELO...")
+
+    rows = []
+    for player_id, nick in favorites:
+        details, err = get_player_details(player_id)
+        if err or not details:
+            continue
+        cs2 = get_cs2_data(details)
+        rows.append({
+            "nickname": safe_get(details, "nickname", nick),
+            "elo": to_int(safe_get(cs2, "faceit_elo", 0), 0),
+            "level": safe_get(cs2, "skill_level"),
+        })
+
+    if not rows:
+        await msg.edit_text("Не удалось загрузить фаворитов.")
+        return
+
+    rows.sort(key=lambda x: x["elo"], reverse=True)
+
+    text = "🏆 Фавориты по ELO\n\n"
+    for i, row in enumerate(rows, start=1):
+        text += f"{i}. {row['nickname']} — {row['elo']} elo | lvl {row['level']}\n"
+
+    await msg.edit_text(text.strip())
+
+
+async def favkd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    favorites = get_favorites(chat_id)
+
+    if not favorites:
+        await update.message.reply_text("Список фаворитов пуст.")
+        return
+
+    msg = await update.message.reply_text("Сравниваю фаворитов по avg K/D за 5 матчей...")
+
+    rows = []
+    for player_id, nick in favorites:
+        details, err1 = get_player_details(player_id)
+        recent, err2 = get_player_recent_stats(player_id, 5)
+        if err1 or err2 or not details:
+            continue
+
+        form = calculate_form_stats(recent)
+        rows.append({
+            "nickname": safe_get(details, "nickname", nick),
+            "avg_kd": form["avg_kd"],
+            "wins": form["wins"],
+            "avg_hs": form["avg_hs"],
+        })
+
+    if not rows:
+        await msg.edit_text("Не удалось загрузить фаворитов.")
+        return
+
+    rows.sort(key=lambda x: (x["avg_kd"], x["wins"], x["avg_hs"]), reverse=True)
+
+    text = "🔫 Фавориты по avg K/D за 5 матчей\n\n"
+    for i, row in enumerate(rows, start=1):
+        text += (
+            f"{i}. {row['nickname']} — K/D {row['avg_kd']:.2f} | "
+            f"Wins {row['wins']} | HS {row['avg_hs']:.1f}%\n"
+        )
+
+    await msg.edit_text(text.strip())
+
+
+async def favform_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    favorites = get_favorites(chat_id)
+
+    if not favorites:
+        await update.message.reply_text("Список фаворитов пуст.")
+        return
+
+    msg = await update.message.reply_text("Сравниваю фаворитов по форме за 5 матчей...")
+
+    rows = []
+    for player_id, nick in favorites:
+        details, err1 = get_player_details(player_id)
+        recent, err2 = get_player_recent_stats(player_id, 5)
+        if err1 or err2 or not details:
+            continue
+
+        form = calculate_form_stats(recent)
+        rows.append({
+            "nickname": safe_get(details, "nickname", nick),
+            "score": form["score"],
+            "wins": form["wins"],
+            "avg_kd": form["avg_kd"],
+            "avg_hs": form["avg_hs"],
+        })
+
+    if not rows:
+        await msg.edit_text("Не удалось загрузить фаворитов.")
+        return
+
+    rows.sort(key=lambda x: (x["score"], x["wins"], x["avg_kd"]), reverse=True)
+
+    text = "🔥 Фавориты по форме за 5 матчей\n\n"
+    for i, row in enumerate(rows, start=1):
+        text += (
+            f"{i}. {row['nickname']} — score {row['score']:.2f} | "
+            f"Wins {row['wins']} | K/D {row['avg_kd']:.2f} | HS {row['avg_hs']:.1f}%\n"
+        )
+
+    await msg.edit_text(text.strip())
+
+
 async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Напиши так: /trackfull nickname")
@@ -548,6 +1087,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_match_id = extract_last_match_id(history) or ""
     chat_id = update.effective_chat.id
     found_nick = safe_get(details, "nickname", nickname)
+    current_elo = safe_get(get_cs2_data(details), "faceit_elo", "")
 
     if chat_id not in TRACKED_PLAYERS:
         TRACKED_PLAYERS[chat_id] = {}
@@ -556,6 +1096,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "nickname": found_nick,
         "last_match_id": last_match_id,
         "active_match_id": "",
+        "last_known_elo": str(current_elo),
     }
 
     save_tracked_player(
@@ -563,7 +1104,8 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_id=player_id,
         nickname=found_nick,
         last_match_id=last_match_id,
-        active_match_id=""
+        active_match_id="",
+        last_known_elo=str(current_elo),
     )
 
     total = len(TRACKED_PLAYERS[chat_id])
@@ -620,7 +1162,8 @@ async def tracklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (
             f"🎮 {data['nickname']}\n"
             f"🧩 Last match: {data.get('last_match_id', 'N/A')}\n"
-            f"🔥 Active match: {data.get('active_match_id', '') or 'нет'}\n\n"
+            f"🔥 Active match: {data.get('active_match_id', '') or 'нет'}\n"
+            f"🏆 Last known elo: {data.get('last_known_elo', '') or 'N/A'}\n\n"
         )
 
     await update.message.reply_text(text.strip())
@@ -647,6 +1190,7 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             nickname = data["nickname"]
             old_last_match_id = data.get("last_match_id", "")
             active_match_id = data.get("active_match_id", "")
+            elo_before = data.get("last_known_elo", "")
 
             history, history_error = get_player_history(player_id, limit=1)
             if history_error:
@@ -679,7 +1223,19 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
 
                 match_stats = find_match_stats_in_recent(recent_data, active_match_id)
                 if match_stats:
-                    text = format_match_finished_message(nickname, active_match_id, match_stats)
+                    details, details_error = get_player_details(player_id)
+                    if details_error or not details:
+                        elo_after = elo_before
+                    else:
+                        elo_after = str(safe_get(get_cs2_data(details), "faceit_elo", elo_before))
+
+                    text = format_match_finished_message(
+                        nickname=nickname,
+                        match_id=active_match_id,
+                        recent_match_stats=match_stats,
+                        elo_before=str(elo_before),
+                        elo_after=str(elo_after),
+                    )
 
                     try:
                         await context.bot.send_message(chat_id=chat_id, text=text)
@@ -688,11 +1244,14 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
 
                     TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
                     TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
+                    TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
+
                     update_tracked_player_state(
                         chat_id,
                         player_id,
                         last_match_id=active_match_id,
-                        active_match_id=""
+                        active_match_id="",
+                        last_known_elo=str(elo_after),
                     )
                     continue
 
@@ -722,6 +1281,13 @@ def main():
     app.add_handler(CommandHandler("faceit", faceit_command))
     app.add_handler(CommandHandler("last5", last5_command))
     app.add_handler(CommandHandler("elo", elo_command))
+    app.add_handler(CommandHandler("form5", form5_command))
+    app.add_handler(CommandHandler("compareform", compareform_command))
+    app.add_handler(CommandHandler("maps30", maps30_command))
+    app.add_handler(CommandHandler("fav", fav_command))
+    app.add_handler(CommandHandler("favelo", favelo_command))
+    app.add_handler(CommandHandler("favkd", favkd_command))
+    app.add_handler(CommandHandler("favform", favform_command))
     app.add_handler(CommandHandler("trackfull", trackfull_command))
     app.add_handler(CommandHandler("untrackfull", untrackfull_command))
     app.add_handler(CommandHandler("tracklist", tracklist_command))
