@@ -1121,21 +1121,21 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total = len(TRACKED_PLAYERS[chat_id])
 
-    if active_match_id:
-        match_details, _ = get_match_details(active_match_id)
-        text = format_match_found_message(found_nick, active_match_id, match_details)
+if active_match_id:
+    match_details, _ = get_match_details(active_match_id)
+    text = format_match_found_message(found_nick, active_match_id, match_details)
 
-        await msg.edit_text(
-            f"{text}\n\n"
-            f"👀 Слежение уже включено.\n"
-            f"Сейчас отслеживаю игроков: {total}"
-        )
-    else:
-        await msg.edit_text(
-            f"👀 Добавил {found_nick} в слежку.\n\n"
-            f"Сейчас отслеживаю игроков: {total}"
-        )
+    await msg.edit_text(
+        f"{text}\n\n"
+        f"👀 Слежение уже включено.\n"
+        f"Сейчас отслеживаю игроков: {total}"
+    )
 
+else:
+    await msg.edit_text(
+        f"👀 Добавил {found_nick} в слежку.\n\n"
+        f"Сейчас отслеживаю игроков: {total}"
+    )
 
 async def untrackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -1329,6 +1329,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
