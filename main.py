@@ -13,8 +13,8 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TG_BOT_TOKEN = os.getenv("8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0")
-FACEIT_API_KEY = os.getenv("6dc92495-d0e2-45f1-a658-d52b02229bfb")
+TG_BOT_TOKEN = 8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0
+FACEIT_API_KEY = 6dc92495-d0e2-45f1-a658-d52b02229bfb
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
@@ -399,6 +399,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
