@@ -1222,19 +1222,26 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             if not new_last_match_id:
                 continue
 
-            if old_last_match_id and new_last_match_id != old_last_match_id and not active_match_id:
-                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_last_match_id
-                update_tracked_player_state(chat_id, player_id, active_match_id=new_last_match_id)
+if old_last_match_id and new_last_match_id != old_last_match_id and not active_match_id:
+    TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_last_match_id
+    update_tracked_player_state(chat_id, player_id, active_match_id=new_last_match_id)
 
-                match_details, _ = get_match_details(new_last_match_id)
-                text = format_match_found_message(nickname, new_last_match_id, match_details)
+    match_details, _ = get_match_details(new_last_match_id)
 
-                try:
-                    await context.bot.send_message(chat_id=chat_id, text=text)
-                except Exception as e:
-                    logger.warning("Failed to send match found message to chat %s: %s", chat_id, e)
+    status = safe_get(match_details, "status")
 
-                continue
+    # Если FACEIT ещё отдаёт старый завершённый матч, не шлём уведомление
+    if status == "FINISHED":
+        continue
+
+    text = format_match_found_message(nickname, new_last_match_id, match_details)
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    except Exception as e:
+        logger.warning("Failed to send match found message to chat %s: %s", chat_id, e)
+
+    continue
 
             if active_match_id:
                 recent_data, recent_error = get_player_recent_stats(player_id, limit=5)
@@ -1322,5 +1329,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
