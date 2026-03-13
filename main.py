@@ -1075,7 +1075,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nickname = " ".join(context.args).strip()
     msg = await update.message.reply_text("Ищу игрока и добавляю в слежку...")
 
-    player_data, error = load_player_full(nickname, recent_limit=1)
+    player_data, error = load_player_full(nickname, recent_limit=5)
     if error:
         await msg.edit_text(error)
         return
@@ -1083,11 +1083,21 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     details = player_data["details"]
     player_id = player_data["player_id"]
     history = player_data["history"]
+    recent = player_data["recent"]
 
-    last_match_id = extract_last_match_id(history) or ""
-    chat_id = update.effective_chat.id
     found_nick = safe_get(details, "nickname", nickname)
     current_elo = safe_get(get_cs2_data(details), "faceit_elo", "")
+    chat_id = update.effective_chat.id
+
+    last_match_id = extract_last_match_id(history) or ""
+    active_match_id = ""
+
+    # Если матч уже есть в history, но его ещё нет в recent stats,
+    # считаем, что игрок, скорее всего, уже играет прямо сейчас
+    if last_match_id:
+        match_stats = find_match_stats_in_recent(recent, last_match_id)
+        if not match_stats:
+            active_match_id = last_match_id
 
     if chat_id not in TRACKED_PLAYERS:
         TRACKED_PLAYERS[chat_id] = {}
@@ -1095,7 +1105,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     TRACKED_PLAYERS[chat_id][player_id] = {
         "nickname": found_nick,
         "last_match_id": last_match_id,
-        "active_match_id": "",
+        "active_match_id": active_match_id,
         "last_known_elo": str(current_elo),
     }
 
@@ -1104,16 +1114,26 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         player_id=player_id,
         nickname=found_nick,
         last_match_id=last_match_id,
-        active_match_id="",
+        active_match_id=active_match_id,
         last_known_elo=str(current_elo),
     )
 
     total = len(TRACKED_PLAYERS[chat_id])
 
-    await msg.edit_text(
-        f"👀 Добавил {found_nick} в слежку.\n\n"
-        f"Сейчас отслеживаю игроков: {total}"
-    )
+    if active_match_id:
+        match_details, _ = get_match_details(active_match_id)
+        text = format_match_found_message(found_nick, active_match_id, match_details)
+
+        await msg.edit_text(
+            f"{text}\n\n"
+            f"👀 Слежение уже включено.\n"
+            f"Сейчас отслеживаю игроков: {total}"
+        )
+    else:
+        await msg.edit_text(
+            f"👀 Добавил {found_nick} в слежку.\n\n"
+            f"Сейчас отслеживаю игроков: {total}"
+        )
 
 
 async def untrackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1301,3 +1321,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
