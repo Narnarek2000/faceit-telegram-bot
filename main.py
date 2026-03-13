@@ -638,9 +638,10 @@ def format_elo_delta(old_elo: str, new_elo: str) -> str:
 
 
 def format_match_found_message(nickname: str, match_id: str, match_details: Optional[dict]) -> str:
+
     if not isinstance(match_details, dict):
         return (
-            f"🔥 {nickname} нашёл матч\n\n"
+            f"🔥 {nickname} сейчас в матче\n\n"
             f"🎮 Игрок: {nickname}\n"
             f"🆔 Match ID: {match_id}"
         )
@@ -650,6 +651,7 @@ def format_match_found_message(nickname: str, match_id: str, match_details: Opti
     region = safe_get(match_details, "region")
 
     map_name = "N/A"
+
     voting = match_details.get("voting", {})
     if isinstance(voting, dict):
         map_info = voting.get("map", {})
@@ -657,15 +659,14 @@ def format_match_found_message(nickname: str, match_id: str, match_details: Opti
             map_name = map_info.get("pick", "N/A")
 
     return (
-        f"🔥 {nickname} нашёл матч\n\n"
-        f"🎮 Игрок: {nickname}\n"
-        f"🆔 Match ID: {match_id}\n"
-        f"📍 Status: {status}\n"
+        f"🔥 {nickname} сейчас в матче\n\n"
+        f"🗺 Map: {map_name}\n"
         f"🏆 Queue: {competition_name}\n"
         f"🌍 Region: {region}\n"
-        f"🗺 Map: {map_name}"
+        f"📍 Status: {status}\n\n"
+        f"👀 Слежение включено\n"
+        f"Я отправлю результат после окончания матча"
     )
-
 
 def format_match_finished_message(
     nickname: str,
@@ -1321,4 +1322,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
