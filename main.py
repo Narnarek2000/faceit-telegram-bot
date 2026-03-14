@@ -557,20 +557,14 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
     if not last_match_id:
         return None, None, None
 
-    recent, recent_error = get_player_recent_stats(player_id, limit=5)
-
-    # Если матч уже попал в recent stats — считаем его завершённым.
-    # Если recent временно недоступен, продолжаем проверку через статус матча.
-    if not recent_error:
-        match_stats = find_match_stats_in_recent(recent, last_match_id)
-        if match_stats:
-            return None, None, None
-
     match_details, match_error = get_match_details(last_match_id)
     if match_error:
         return last_match_id, None, match_error
 
     status = safe_get(match_details, "status")
+
+    # У FACEIT матч может появляться в recent stats ещё до статуса FINISHED,
+    # поэтому источник истины для "live" — именно статус матча.
     if status == "FINISHED":
         return None, None, None
 
