@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Optional, Dict, Tuple, List
 
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -898,7 +898,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, reply_markup=build_main_menu_keyboard())
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Privet 👋\n\n"
+        "Команды:\n"
+        "/menu\n"
+        "/faceit nickname\n"
+        "/last5 nickname\n"
+    )
+    await update.message.reply_text(text, reply_markup=build_main_menu_keyboard())
 
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = (
+        "📚 FACEIT BOT — команды\n\n"
+
+        "🔎 Игроки\n"
+        "/faceit nickname — профиль игрока\n"
+        "/elo nickname — текущий ELO\n"
+        "/last5 nickname — последние 5 матчей\n"
+        "/form5 nickname — форма за 5 матчей\n"
+        "/compareform nick1 nick2 — сравнить форму\n"
+        "/maps30 nickname — лучшие карты\n\n"
+
+        "⭐ Фавориты\n"
+        "/fav add nickname\n"
+        "/fav remove nickname\n"
+        "/fav list\n"
+        "/favlive\n"
+        "/favelo\n"
+        "/favkd\n"
+        "/favform\n"
+        "/favgainers\n"
+        "/favlosers\n\n"
+
+        "👀 Слежка\n"
+        "/trackfull nickname\n"
+        "/untrackfull nickname\n"
+        "/tracklist\n"
+        "/cleartrack\n\n"
+
+        "⚙️ Другое\n"
+        "/menu\n"
+        "/help"
+    )
+
+    await update.message.reply_text(text)
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Выбери действие:",
@@ -1777,6 +1823,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("faceit", faceit_command))
     app.add_handler(CommandHandler("last5", last5_command))
     app.add_handler(CommandHandler("elo", elo_command))
