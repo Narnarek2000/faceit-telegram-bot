@@ -1491,7 +1491,35 @@ async def cleartrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"🧹 Очистил список слежки. Удалено игроков: {count}")
     else:
         await update.message.reply_text("Список слежки и так пуст.")
+async def trackstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if not context.args:
+        await update.message.reply_text("Напиши так: /trackstatus nickname")
+        return
+
+    nickname = " ".join(context.args).strip().lower()
+    chat_id = update.effective_chat.id
+
+    if chat_id not in TRACKED_PLAYERS:
+        await update.message.reply_text("Слежка не запущена.")
+        return
+
+    for player_id, data in TRACKED_PLAYERS[chat_id].items():
+
+        if data["nickname"].lower() == nickname:
+
+            text = (
+                f"📡 Tracking status\n\n"
+                f"🎮 Player: {data['nickname']}\n"
+                f"🧩 Last match: {data.get('last_match_id', 'N/A')}\n"
+                f"🔥 Active match: {data.get('active_match_id') or 'нет'}\n"
+                f"🏆 Last known elo: {data.get('last_known_elo', 'N/A')}"
+            )
+
+            await update.message.reply_text(text)
+            return
+
+    await update.message.reply_text("Игрок не найден в списке слежки.")
 
 # =========================
 # BUTTONS
@@ -1852,6 +1880,7 @@ def main():
     app.add_handler(CommandHandler("fav", fav_command))
     app.add_handler(CommandHandler("favlive", favlive_command))
     app.add_handler(CommandHandler("favelo", favelo_command))
+    app.add_handler(CommandHandler("trackstatus", trackstatus_command))
     app.add_handler(CommandHandler("favkd", favkd_command))
     app.add_handler(CommandHandler("favform", favform_command))
     app.add_handler(CommandHandler("favgainers", favgainers_command))
