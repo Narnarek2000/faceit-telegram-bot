@@ -376,7 +376,68 @@ def get_lifetime_stats(stats_data: Optional[dict]) -> dict:
         "adr": safe_get(lifetime, "Average ADR"),
     }
 
+def detect_lobby(match_details):
 
+    if not isinstance(match_details, dict):
+        return "N/A"
+
+    voting = match_details.get("voting", {})
+
+    if not isinstance(voting, dict):
+        return "N/A"
+
+    map_info = voting.get("map", {})
+
+    if not isinstance(map_info, dict):
+        return "N/A"
+
+    pick = map_info.get("pick")
+
+    if isinstance(pick, list):
+        return ", ".join(pick)
+
+    if pick:
+        return str(pick)
+
+    return "N/A"
+def get_lobby_average_elo(match_details):
+
+    if not isinstance(match_details, dict):
+        return "N/A"
+
+    teams = match_details.get("teams", {})
+
+    elo_list = []
+
+    for team in teams.values():
+
+        roster = team.get("roster", [])
+
+        for player in roster:
+
+            player_id = player.get("player_id")
+
+            if not player_id:
+                continue
+
+            details, err = get_player_details(player_id)
+
+            if err or not details:
+                continue
+
+            cs2 = get_cs2_data(details)
+
+            elo = safe_get(cs2, "faceit_elo")
+
+            try:
+                elo_list.append(int(elo))
+            except:
+                pass
+
+    if not elo_list:
+        return "N/A"
+
+    return int(sum(elo_list) / len(elo_list))    
 def get_cs2_data(details: dict) -> dict:
     return details.get("games", {}).get("cs2", {})
 
@@ -720,17 +781,18 @@ def format_elo_delta(old_elo: str, new_elo: str) -> str:
 
 
 def format_match_found_message(nickname: str, match_id: str, match_details: Optional[dict]) -> str:
+
     if not isinstance(match_details, dict):
         return (
-            f"🔥 {nickname} сейчас в матче\n\n"
-            f"🎮 Игрок: {nickname}\n"
+            f"🔥 {nickname} нашёл матч\n\n"
             f"🆔 Match ID: {match_id}"
         )
 
-    status = safe_get(match_details, "status")
     competition_name = safe_get(match_details, "competition_name")
     region = safe_get(match_details, "region")
+    status = safe_get(match_details, "status")
 
+    # MAP VOTE
     map_name = "N/A"
     voting = match_details.get("voting", {})
     if isinstance(voting, dict):
@@ -742,11 +804,12 @@ def format_match_found_message(nickname: str, match_id: str, match_details: Opti
             else:
                 map_name = str(pick)
 
+    # LOBBY ELO
     lobby_text = build_match_lobby_text(match_details)
 
     text = (
-        f"🔥 {nickname} сейчас в матче\n\n"
-        f"🗺 Map: {map_name}\n"
+        f"🔥 {nickname} нашёл матч\n\n"
+        f"🗺 Map vote: {map_name}\n"
         f"🏆 Queue: {competition_name}\n"
         f"🌍 Region: {region}\n"
         f"📍 Status: {status}"
@@ -755,7 +818,8 @@ def format_match_found_message(nickname: str, match_id: str, match_details: Opti
     if lobby_text:
         text += f"\n\n{lobby_text}"
 
-    text += "\n\n👀 Слежение включено\nЯ отправлю результат после окончания матча"
+    text += "\n\n👀 Слежение активно\nЯ отправлю результат после окончания матча"
+
     return text
 
 
@@ -923,25 +987,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/maps30 nickname — лучшие карты\n\n"
 
         "⭐ Фавориты\n"
-        "/fav add nickname\n"
-        "/fav remove nickname\n"
-        "/fav list\n"
-        "/favlive\n"
-        "/favelo\n"
-        "/favkd\n"
-        "/favform\n"
-        "/favgainers\n"
-        "/favlosers\n\n"
+        "/fav add nickname — добавить игрока\n"
+        "/fav remove nickname — удалить игрока\n"
+        "/fav list — список фаворитов\n"
+        "/favlive — кто играет сейчас\n"
+        "/favelo — рейтинг по elo\n"
+        "/favkd — рейтинг по kd\n"
+        "/favform — рейтинг по форме\n"
+        "/favgainers — рост elo\n"
+        "/favlosers — падение elo\n\n"
 
         "👀 Слежка\n"
-        "/trackfull nickname\n"
-        "/untrackfull nickname\n"
-        "/tracklist\n"
-        "/cleartrack\n\n"
+        "/trackfull nickname — начать слежку\n"
+        "/untrackfull nickname — убрать слежку\n"
+        "/tracklist — список слежки\n"
+        "/trackstatus nickname — статус слежки\n"
+        "/tracklive — кто сейчас в игре\n"
+        "/cleartrack — очистить слежку\n\n"
 
         "⚙️ Другое\n"
-        "/menu\n"
-        "/help"
+        "/menu — главное меню\n"
+        "/help — список команд"
     )
 
     await update.message.reply_text(text)
