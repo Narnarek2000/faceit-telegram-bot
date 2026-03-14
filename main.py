@@ -16,12 +16,12 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TG_BOT_TOKEN = "8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0"
-FACEIT_API_KEY = "6dc92495-d0e2-45f1-a658-d52b02229bfb"
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+FACEIT_API_KEY = os.getenv("FACEIT_API_KEY", "")
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
-DB_PATH = "/data/faceit_bot.db"
+DB_PATH = os.getenv("DB_PATH", "/data/faceit_bot.db")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -44,6 +44,9 @@ TRACKED_PLAYERS: Dict[int, Dict[str, Dict[str, str]]] = {}
 # DATABASE
 # =========================
 def get_db_connection():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 
@@ -630,6 +633,14 @@ def build_faceit_text(details: dict, stats_data: Optional[dict]) -> str:
     )
 
 
+def get_player_avatar_url(details: Optional[dict]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    avatar = details.get("avatar") or details.get("avatar_url") or ""
+    return str(avatar).strip()
+
+
 def build_elo_text(details: dict) -> str:
     nickname = safe_get(details, "nickname")
     cs2 = get_cs2_data(details)
@@ -1023,7 +1034,22 @@ async def faceit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = build_faceit_text(player_data["details"], player_data["stats"])
-    await msg.edit_text(text, reply_markup=build_player_keyboard(player_data["player_id"]))
+    reply_markup = build_player_keyboard(player_data["player_id"])
+    avatar_url = get_player_avatar_url(player_data["details"])
+
+    if avatar_url:
+        try:
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=avatar_url,
+                caption=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning("Failed to send avatar photo for profile: %s", e)
+
+    await msg.edit_text(text, reply_markup=reply_markup)
 
 
 async def last5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1792,6 +1818,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "stats":
         text = build_faceit_text(player_data["details"], player_data["stats"])
+        avatar_url = get_player_avatar_url(player_data["details"])
+        if avatar_url:
+            try:
+                await query.message.delete()
+                await query.message.chat.send_photo(
+                    photo=avatar_url,
+                    caption=text,
+                    reply_markup=build_player_keyboard(player_id),
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to send avatar photo for stats callback: %s", e)
     elif action == "form5":
         text = build_form5_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     elif action == "last5":
