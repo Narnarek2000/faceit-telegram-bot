@@ -1820,6 +1820,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "stats":
         text = build_faceit_text(player_data["details"], player_data["stats"])
         avatar_url = get_player_avatar_url(player_data["details"])
+
         if avatar_url:
             try:
                 await query.message.delete()
@@ -1831,6 +1832,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             except Exception as e:
                 logger.warning("Failed to send avatar photo for stats callback: %s", e)
+
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.chat.send_message(
+                text=text,
+                reply_markup=build_player_keyboard(player_id),
+            )
+            return
+
     elif action == "form5":
         text = build_form5_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     elif action == "last5":
@@ -1841,6 +1851,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = build_maps30_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     else:
         text = "Неизвестная кнопка."
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.chat.send_message(
+            text=text[:4000],
+            reply_markup=build_player_keyboard(player_id),
+        )
+        return
 
     await query.edit_message_text(text, reply_markup=build_player_keyboard(player_id))
 async def tracklive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
