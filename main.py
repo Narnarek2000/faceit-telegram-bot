@@ -1747,7 +1747,60 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "Неизвестная кнопка."
 
     await query.edit_message_text(text, reply_markup=build_player_keyboard(player_id))
+async def tracklive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    chat_id = update.effective_chat.id
+
+    if chat_id not in TRACKED_PLAYERS or not TRACKED_PLAYERS[chat_id]:
+        await update.message.reply_text("Список слежки пуст.")
+        return
+
+    msg = await update.message.reply_text("Проверяю live матчи...")
+
+    lines = []
+
+    for player_id, data in TRACKED_PLAYERS[chat_id].items():
+
+        nickname = data["nickname"]
+
+        match_id, match_details, err = get_live_match_info(player_id)
+
+        if err:
+            continue
+
+        if not match_id:
+            continue
+
+        map_name = "N/A"
+        queue = safe_get(match_details, "competition_name")
+        region = safe_get(match_details, "region")
+        status = safe_get(match_details, "status")
+
+        voting = match_details.get("voting", {})
+        if isinstance(voting, dict):
+            map_info = voting.get("map", {})
+            if isinstance(map_info, dict):
+                pick = map_info.get("pick")
+                if isinstance(pick, list):
+                    map_name = ", ".join(pick)
+                elif pick:
+                    map_name = str(pick)
+
+        lines.append(
+            f"🔥 {nickname}\n"
+            f"🗺 Map: {map_name}\n"
+            f"🏆 Queue: {queue}\n"
+            f"🌍 Region: {region}\n"
+            f"📍 Status: {status}\n"
+        )
+
+    if not lines:
+        await msg.edit_text("Сейчас никто из отслеживаемых игроков не в матче.")
+        return
+
+    text = "🔥 Live matches\n\n" + "\n".join(lines)
+
+    await msg.edit_text(text[:4000])
 
 # =========================
 # BACKGROUND TRACKER
@@ -1885,6 +1938,7 @@ def main():
     app.add_handler(CommandHandler("favform", favform_command))
     app.add_handler(CommandHandler("favgainers", favgainers_command))
     app.add_handler(CommandHandler("favlosers", favlosers_command))
+    app.add_handler(CommandHandler("tracklive", tracklive_command))
     app.add_handler(CommandHandler("trackfull", trackfull_command))
     app.add_handler(CommandHandler("untrackfull", untrackfull_command))
     app.add_handler(CommandHandler("tracklist", tracklist_command))
