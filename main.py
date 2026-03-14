@@ -21,7 +21,7 @@ FACEIT_API_KEY = "6dc92495-d0e2-45f1-a658-d52b02229bfb"
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
-DB_PATH = "faceit_bot.db"
+DB_PATH = "/data/faceit_bot.db"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
