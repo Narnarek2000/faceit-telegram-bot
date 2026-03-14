@@ -330,6 +330,10 @@ def get_match_details(match_id: str) -> Tuple[Optional[dict], Optional[str]]:
     return faceit_request(f"/matches/{match_id}")
 
 
+def get_match_stats(match_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    return faceit_request(f"/matches/{match_id}/stats")
+
+
 # =========================
 # HELPERS
 # =========================
@@ -494,6 +498,93 @@ def find_match_stats_in_recent(recent_data: Optional[dict], match_id: str) -> Op
     return None
 
 
+def extract_player_match_stats(match_stats_data: Optional[dict], player_id: str, nickname: str) -> Optional[dict]:
+    if not isinstance(match_stats_data, dict):
+        return None
+
+    rounds = match_stats_data.get("rounds", [])
+    if not isinstance(rounds, list):
+        return None
+
+    nickname_lower = (nickname or "").strip().lower()
+
+    for round_item in rounds:
+        if not isinstance(round_item, dict):
+            continue
+
+        teams = round_item.get("teams", {})
+        if not isinstance(teams, dict):
+            continue
+
+        round_stats = round_item.get("round_stats", {})
+        if not isinstance(round_stats, dict):
+            round_stats = {}
+
+        map_name = safe_get(round_stats, "Map", safe_get(round_item, "map", "N/A"))
+        score = (
+            round_stats.get("Final Score")
+            or round_stats.get("Score")
+            or round_stats.get("score")
+            or "N/A"
+        )
+
+        for team_data in teams.values():
+            if not isinstance(team_data, dict):
+                continue
+
+            players = team_data.get("players", [])
+            if not isinstance(players, list):
+                continue
+
+            for player in players:
+                if not isinstance(player, dict):
+                    continue
+
+                current_player_id = player.get("player_id") or player.get("id")
+                current_nick = str(player.get("nickname", "")).strip().lower()
+
+                is_target = False
+                if player_id and current_player_id == player_id:
+                    is_target = True
+                elif nickname_lower and current_nick == nickname_lower:
+                    is_target = True
+
+                if not is_target:
+                    continue
+
+                player_stats = player.get("player_stats", {})
+                if not isinstance(player_stats, dict):
+                    player_stats = {}
+
+                kills = safe_get(player_stats, "Kills", "0")
+                deaths = safe_get(player_stats, "Deaths", "0")
+                kd = safe_get(player_stats, "K/D Ratio", "N/A")
+                if kd == "N/A":
+                    kills_val = to_float(kills, 0)
+                    deaths_val = to_float(deaths, 0)
+                    kd = f"{kills_val / deaths_val:.2f}" if deaths_val > 0 else ("0.00" if kills_val == 0 else f"{kills_val:.2f}")
+
+                hs = safe_get(player_stats, "Headshots %", "N/A")
+                if hs == "N/A":
+                    hs = safe_get(player_stats, "HS%", safe_get(player_stats, "Headshots", "N/A"))
+
+                return {
+                    "stats": {
+                        "Map": map_name,
+                        "Score": score,
+                        "Kills": kills,
+                        "Deaths": deaths,
+                        "K/D Ratio": kd,
+                        "Headshots %": hs,
+                        "K/R Ratio": safe_get(player_stats, "K/R Ratio", safe_get(player_stats, "K/R", "N/A")),
+                        "ADR": safe_get(player_stats, "ADR", "N/A"),
+                        "Result": safe_get(player_stats, "Result", "N/A"),
+                    }
+                }
+
+    return None
+
+
 def calculate_form_stats(recent_data: Optional[dict]) -> dict:
     items = recent_data.get("items", []) if isinstance(recent_data, dict) else []
 
@@ -557,20 +648,14 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
     if not last_match_id:
         return None, None, None
 
-    recent, recent_error = get_player_recent_stats(player_id, limit=5)
-
-    # Если матч уже попал в recent stats — считаем его завершённым.
-    # Если recent временно недоступен, продолжаем проверку через статус матча.
-    if not recent_error:
-        match_stats = find_match_stats_in_recent(recent, last_match_id)
-        if match_stats:
-            return None, None, None
-
     match_details, match_error = get_match_details(last_match_id)
     if match_error:
         return last_match_id, None, match_error
 
     status = safe_get(match_details, "status")
+
+    # У FACEIT матч может появляться в recent stats ещё до статуса FINISHED,
+    # поэтому источник истины для "live" — именно статус матча.
     if status == "FINISHED":
         return None, None, None
 
@@ -885,6 +970,7 @@ def format_match_finished_message(
     kd = safe_get(stats, "K/D Ratio")
     hs = format_percent(safe_get(stats, "Headshots %"))
     kr = safe_get(stats, "K/R Ratio")
+    adr = safe_get(stats, "ADR")
     score = stats.get("Final Score") or stats.get("Score") or "N/A"
 
     result_emoji = "🟢" if result == "WIN" else ("🔴" if result == "LOSS" else "⚪")
@@ -900,6 +986,7 @@ def format_match_finished_message(
         f"🔫 K/D: {kills}/{deaths} ({kd})\n"
         f"🎯 HS: {hs}\n"
         f"⚡ K/R: {kr}\n"
+        f"💥 ADR: {adr}\n"
         f"🏆 ELO: {elo_text}"
     )
 
@@ -1989,6 +2076,9 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             if active_match_id and not current_live_match_id:
                 recent_data, _ = get_player_recent_stats(player_id, 10)
                 match_stats = find_match_stats_in_recent(recent_data, active_match_id)
+                if not match_stats:
+                    match_stats_data, _ = get_match_stats(active_match_id)
+                    match_stats = extract_player_match_stats(match_stats_data, player_id, nickname)
 
                 details, _ = get_player_details(player_id)
                 elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
@@ -2023,6 +2113,9 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             if newest_match_id and newest_match_id != last_match_id and not active_match_id:
                 recent_data, _ = get_player_recent_stats(player_id, 10)
                 match_stats = find_match_stats_in_recent(recent_data, newest_match_id)
+                if not match_stats:
+                    match_stats_data, _ = get_match_stats(newest_match_id)
+                    match_stats = extract_player_match_stats(match_stats_data, player_id, nickname)
 
                 details, _ = get_player_details(player_id)
                 elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
