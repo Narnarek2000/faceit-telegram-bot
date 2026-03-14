@@ -962,15 +962,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, reply_markup=build_main_menu_keyboard())
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "Privet 👋\n\n"
-        "Команды:\n"
-        "/menu\n"
-        "/faceit nickname\n"
-        "/last5 nickname\n"
-    )
-    await update.message.reply_text(text, reply_markup=build_main_menu_keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1881,89 +1872,40 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             active_match_id = data.get("active_match_id", "")
             last_match_id = data.get("last_match_id", "")
             elo_before = data.get("last_known_elo", "")
+
             # --- ПРОВЕРКА LIVE МАТЧА ---
-        match_id, match_details, err = get_live_match_info(player_id)
+            match_id, match_details, err = get_live_match_info(player_id)
 
-        if match_id and not active_match_id and match_id != last_match_id:
+            if match_id and not active_match_id and match_id != last_match_id:
 
-            TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = match_id
-            TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = match_id
+                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = match_id
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = match_id
 
-            update_tracked_player_state(
-                chat_id,
-                player_id,
-                active_match_id=match_id
-            )
+                active_match_id = match_id
 
-            text = format_match_found_message(
-                nickname,
-                match_id,
-                match_details
-            )
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    active_match_id=match_id
+                )
 
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=text[:4000]
-            )
+                text = format_match_found_message(
+                    nickname,
+                    match_id,
+                    match_details
+                )
 
-            
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text[:4000]
+                )
 
-
-        history, history_error = get_player_history(player_id, limit=1)
-
-        if history_error:
-            continue
-
-        new_last_match_id = extract_last_match_id(history)
-
-        if not new_last_match_id:
-            continue
-
-
-            history, history_error = get_player_history(player_id, limit=1)
-
-            if history_error:
                 continue
-
-            new_last_match_id = extract_last_match_id(history)
-
-            if not new_last_match_id:
-                continue
-
-            # --- НОВЫЙ МАТЧ НАЧАЛСЯ ---
-            if not active_match_id and new_last_match_id != last_match_id:
-
-                match_details, _ = get_match_details(new_last_match_id)
-                status = safe_get(match_details, "status")
-
-                if status != "FINISHED":
-
-                    TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_last_match_id
-
-                    update_tracked_player_state(
-                        chat_id,
-                        player_id,
-                        active_match_id=new_last_match_id
-                    )
-
-                    text = format_match_found_message(
-                        nickname,
-                        new_last_match_id,
-                        match_details
-                    )
-
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=text[:4000]
-                    )
-
-                    continue
 
             # --- ПРОВЕРКА ЗАКОНЧИЛСЯ ЛИ МАТЧ ---
             if active_match_id:
 
                 match_details, _ = get_match_details(active_match_id)
-
                 status = safe_get(match_details, "status")
 
                 if status == "FINISHED":
@@ -2007,7 +1949,6 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
                         active_match_id="",
                         last_known_elo=str(elo_after)
                     )
-
 # =========================
 # MAIN
 # =========================
@@ -2049,7 +1990,7 @@ def main():
     app.add_handler(CommandHandler("cleartrack", cleartrack_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    app.job_queue.run_repeating(track_matches_job, interval=20, first=10)
+    app.job_queue.run_repeating(track_matches_job, interval=15, first=10)
 
     print("Bot started...")
     app.run_polling()
