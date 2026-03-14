@@ -540,12 +540,13 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
         return None, None, None
 
     recent, recent_error = get_player_recent_stats(player_id, limit=5)
-    if recent_error:
-        return None, None, recent_error
 
-    match_stats = find_match_stats_in_recent(recent, last_match_id)
-    if match_stats:
-        return None, None, None
+    # Если матч уже попал в recent stats — считаем его завершённым.
+    # Если recent временно недоступен, продолжаем проверку через статус матча.
+    if not recent_error:
+        match_stats = find_match_stats_in_recent(recent, last_match_id)
+        if match_stats:
+            return None, None, None
 
     match_details, match_error = get_match_details(last_match_id)
     if match_error:
@@ -1911,135 +1912,96 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             last_match_id = data.get("last_match_id", "")
             elo_before = data.get("last_known_elo", "")
 
-           # --- ПРОВЕРКА НАЧАЛСЯ ЛИ НОВЫЙ МАТЧ ---
-            history, _err = get_player_history(player_id, limit=1)
-            new_match_id = extract_last_match_id(history)
+            current_live_match_id, current_live_match_details, live_error = get_live_match_info(player_id)
+            if live_error:
+                continue
 
-            if new_match_id and new_match_id != last_match_id and not active_match_id:
+            # --- Старт нового матча ---
+            # Условия старта:
+            # 1) сейчас есть live матч
+            # 2) этот матч отличается от сохранённого active_match_id
+            if current_live_match_id and current_live_match_id != active_match_id:
+                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = current_live_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = current_live_match_id
 
-               match_details, _ = get_match_details(new_match_id)
-               status = safe_get(match_details, "status")
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=current_live_match_id,
+                    active_match_id=current_live_match_id,
+                )
 
-               if status != "FINISHED":
+                text = format_match_found_message(
+                    nickname,
+                    current_live_match_id,
+                    current_live_match_details,
+                )
 
-                   TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_match_id
-                   TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_match_id
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
+                continue
 
-                   active_match_id = new_match_id
+            # --- Финиш активного матча ---
+            # Если был active матч, а live больше нет — матч завершился.
+            if active_match_id and not current_live_match_id:
+                recent_data, _ = get_player_recent_stats(player_id, 10)
+                match_stats = find_match_stats_in_recent(recent_data, active_match_id)
 
-                   update_tracked_player_state(
-                       chat_id,
-                       player_id,
-                       active_match_id=new_match_id
-                   )
+                details, _ = get_player_details(player_id)
+                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
 
-                   text = format_match_found_message(
-                       nickname,
-                       new_match_id,
-                       match_details
-                   )
+                text = format_match_finished_message(
+                    nickname,
+                    active_match_id,
+                    match_stats,
+                    elo_before,
+                    elo_after,
+                )
 
-                   await context.bot.send_message(
-                       chat_id=chat_id,
-                       text=text[:4000]
-                   )
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
 
-                   continue
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
+                TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
 
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=active_match_id,
+                    active_match_id="",
+                    last_known_elo=str(elo_after),
+                )
+                continue
 
-            # --- ПРОВЕРКА ПРОПУЩЕННОГО МАТЧА ---  
-            history, _err = get_player_history(player_id, limit=1)
-            
-            new_last_match_id = extract_last_match_id(history)
-            if new_last_match_id and new_last_match_id != last_match_id and not active_match_id:
+            # --- Пропущенный завершённый матч (без live-уведомления) ---
+            history, _ = get_player_history(player_id, limit=1)
+            newest_match_id = extract_last_match_id(history)
 
-               recent_data, _ = get_player_recent_stats(player_id, 5)
-               match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
-               if not match_stats:
-                   recent_data, _ = get_player_recent_stats(player_id, 10)
-                   match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
+            if newest_match_id and newest_match_id != last_match_id and not active_match_id:
+                recent_data, _ = get_player_recent_stats(player_id, 10)
+                match_stats = find_match_stats_in_recent(recent_data, newest_match_id)
 
-               details, _ = get_player_details(player_id)
+                details, _ = get_player_details(player_id)
+                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
 
-               elo_after = safe_get(
-                   get_cs2_data(details),
-                   "faceit_elo",
-                   elo_before
-               )
+                text = format_match_finished_message(
+                    nickname,
+                    newest_match_id,
+                    match_stats,
+                    elo_before,
+                    elo_after,
+                )
 
-               text = format_match_finished_message(
-                   nickname,
-                   new_last_match_id,
-                   match_stats,
-                   elo_before,
-                   elo_after
-               )
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
 
-               await context.bot.send_message(
-                   chat_id=chat_id,
-                   text=text[:4000]
-               )
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = newest_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
 
-               TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_last_match_id
-               TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
-
-               update_tracked_player_state(
-                   chat_id,
-                   player_id,
-                   last_match_id=new_last_match_id,
-                   last_known_elo=str(elo_after)
-               )
-
-               continue
-
-            
-            # --- ПРОВЕРКА ЗАКОНЧИЛСЯ ЛИ МАТЧ ---
-            if active_match_id:
-
-                match_details, _ = get_match_details(active_match_id)
-                status = safe_get(match_details, "status")
-
-                if status == "FINISHED":
-
-                    recent_data, _ = get_player_recent_stats(player_id, 5)
-
-                    match_stats = find_match_stats_in_recent(
-                        recent_data,
-                        active_match_id
-                    )
-
-                    details, _ = get_player_details(player_id)
-
-                    elo_after = safe_get(
-                        get_cs2_data(details),
-                        "faceit_elo",
-                        elo_before
-                    )
-
-                    text = format_match_finished_message(
-                        nickname,
-                        active_match_id,
-                        match_stats,
-                        elo_before,
-                        elo_after
-                    )
-
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=text[:4000]
-                    )
-
-                    TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
-                    TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
-                    TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
-
-                    update_tracked_player_state(
-                        chat_id,
-                        player_id,
-                        last_match_id=active_match_id,
-                        active_match_id="",
-                        last_known_elo=str(elo_after)
-                    )
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=newest_match_id,
+                    last_known_elo=str(elo_after),
+                )
 # =========================
 # MAIN
 # =========================
