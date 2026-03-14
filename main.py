@@ -1881,6 +1881,32 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             active_match_id = data.get("active_match_id", "")
             last_match_id = data.get("last_match_id", "")
             elo_before = data.get("last_known_elo", "")
+            # --- ПРОВЕРКА LIVE МАТЧА ---
+match_id, match_details, err = get_live_match_info(player_id)
+
+if match_id and not active_match_id and match_id != last_match_id:
+
+    TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = match_id
+    TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = match_id
+
+    update_tracked_player_state(
+        chat_id,
+        player_id,
+        active_match_id=match_id
+    )
+
+    text = format_match_found_message(
+        nickname,
+        match_id,
+        match_details
+    )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text[:4000]
+    )
+
+    continue
 
             history, history_error = get_player_history(player_id, limit=1)
 
