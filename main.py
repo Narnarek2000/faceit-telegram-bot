@@ -16,12 +16,12 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TG_BOT_TOKEN = "8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0"
-FACEIT_API_KEY = "6dc92495-d0e2-45f1-a658-d52b02229bfb"
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+FACEIT_API_KEY = os.getenv("FACEIT_API_KEY", "")
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
-DB_PATH = "/data/faceit_bot.db"
+DB_PATH = os.getenv("DB_PATH", "/data/faceit_bot.db")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -44,6 +44,9 @@ TRACKED_PLAYERS: Dict[int, Dict[str, Dict[str, str]]] = {}
 # DATABASE
 # =========================
 def get_db_connection():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 
