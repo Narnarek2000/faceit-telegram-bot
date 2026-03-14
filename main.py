@@ -1873,43 +1873,53 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             last_match_id = data.get("last_match_id", "")
             elo_before = data.get("last_known_elo", "")
 
-            # --- ПРОВЕРКА LIVE МАТЧА ---
-            match_id, match_details, err = get_live_match_info(player_id)
+           # --- ПРОВЕРКА НАЧАЛСЯ ЛИ НОВЫЙ МАТЧ ---
+            history, _err = get_player_history(player_id, limit=1)
+            new_match_id = extract_last_match_id(history)
 
-            if match_id and not active_match_id and match_id != last_match_id:
+            if new_match_id and new_match_id != last_match_id and not active_match_id:
 
-                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = match_id
-                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = match_id
+               match_details, _ = get_match_details(new_match_id)
+               status = safe_get(match_details, "status")
 
-                active_match_id = match_id
+               if status != "FINISHED":
 
-                update_tracked_player_state(
-                    chat_id,
-                    player_id,
-                    active_match_id=match_id
-                )
+                   TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_match_id
+                   TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_match_id
 
-                text = format_match_found_message(
-                    nickname,
-                    match_id,
-                    match_details
-                )
+                   active_match_id = new_match_id
 
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=text[:4000]
-                )
+                   update_tracked_player_state(
+                       chat_id,
+                       player_id,
+                       active_match_id=new_match_id
+                   )
 
-                continue
+                   text = format_match_found_message(
+                       nickname,
+                       new_match_id,
+                       match_details
+                   )
+
+                   await context.bot.send_message(
+                       chat_id=chat_id,
+                       text=text[:4000]
+                   )
+
+                   continue
 
 
             # --- ПРОВЕРКА ПРОПУЩЕННОГО МАТЧА ---  
-            history, _ = get_player_history(player_id, limit=1)
+            history, _err = get_player_history(player_id, limit=1)
+            
             new_last_match_id = extract_last_match_id(history)
             if new_last_match_id and new_last_match_id != last_match_id and not active_match_id:
 
                recent_data, _ = get_player_recent_stats(player_id, 5)
                match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
+               if not match_stats:
+                   recent_data, _ = get_player_recent_stats(player_id, 10)
+                   match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
 
                details, _ = get_player_details(player_id)
 
