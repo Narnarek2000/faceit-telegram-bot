@@ -633,6 +633,14 @@ def build_faceit_text(details: dict, stats_data: Optional[dict]) -> str:
     )
 
 
+def get_player_avatar_url(details: Optional[dict]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    avatar = details.get("avatar") or details.get("avatar_url") or ""
+    return str(avatar).strip()
+
+
 def build_elo_text(details: dict) -> str:
     nickname = safe_get(details, "nickname")
     cs2 = get_cs2_data(details)
@@ -1026,7 +1034,22 @@ async def faceit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = build_faceit_text(player_data["details"], player_data["stats"])
-    await msg.edit_text(text, reply_markup=build_player_keyboard(player_data["player_id"]))
+    reply_markup = build_player_keyboard(player_data["player_id"])
+    avatar_url = get_player_avatar_url(player_data["details"])
+
+    if avatar_url:
+        try:
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=avatar_url,
+                caption=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning("Failed to send avatar photo for profile: %s", e)
+
+    await msg.edit_text(text, reply_markup=reply_markup)
 
 
 async def last5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1795,6 +1818,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "stats":
         text = build_faceit_text(player_data["details"], player_data["stats"])
+        avatar_url = get_player_avatar_url(player_data["details"])
+        if avatar_url:
+            try:
+                await query.message.delete()
+                await query.message.chat.send_photo(
+                    photo=avatar_url,
+                    caption=text,
+                    reply_markup=build_player_keyboard(player_id),
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to send avatar photo for stats callback: %s", e)
     elif action == "form5":
         text = build_form5_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     elif action == "last5":
