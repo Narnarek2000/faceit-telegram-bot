@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import time
 from collections import defaultdict
 from typing import Optional, Dict, Tuple, List
 
@@ -21,6 +22,8 @@ FACEIT_API_KEY = os.getenv("FACEIT_API_KEY", "")
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
+FACEIT_MAX_RETRIES = 3
+FACEIT_RETRY_DELAY_SEC = 0.6
 DB_PATH = os.getenv("DB_PATH", "/data/faceit_bot.db")
 
 logging.basicConfig(
@@ -250,19 +253,34 @@ def faceit_request(path: str, params: Optional[dict] = None) -> Tuple[Optional[d
         "Accept": "application/json",
     }
 
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+    last_error = "Unknown FACEIT error"
 
-        if r.status_code != 200:
+    for attempt in range(1, FACEIT_MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+
+            if r.status_code == 200:
+                if "application/json" not in r.headers.get("content-type", "").lower():
+                    return None, f"Non-JSON response: {r.text[:300]}"
+                return r.json(), None
+
+            # Ретраим только временные ошибки API
+            if r.status_code in (429, 500, 502, 503, 504):
+                last_error = f"FACEIT transient error {r.status_code}: {r.text[:300]}"
+                logger.warning("FACEIT request failed (attempt %s/%s): %s %s", attempt, FACEIT_MAX_RETRIES, path, last_error)
+                if attempt < FACEIT_MAX_RETRIES:
+                    time.sleep(FACEIT_RETRY_DELAY_SEC * attempt)
+                continue
+
             return None, f"FACEIT error {r.status_code}: {r.text[:300]}"
 
-        if "application/json" not in r.headers.get("content-type", "").lower():
-            return None, f"Non-JSON response: {r.text[:300]}"
+        except requests.RequestException as e:
+            last_error = f"Request error: {e}"
+            logger.warning("FACEIT request exception (attempt %s/%s): %s %s", attempt, FACEIT_MAX_RETRIES, path, e)
+            if attempt < FACEIT_MAX_RETRIES:
+                time.sleep(FACEIT_RETRY_DELAY_SEC * attempt)
 
-        return r.json(), None
-
-    except requests.RequestException as e:
-        return None, f"Request error: {e}"
+    return None, last_error
 
 
 def search_player(nickname: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -357,14 +375,14 @@ def format_percent(value) -> str:
 def to_float(value, default=0.0) -> float:
     try:
         return float(str(value).replace("%", "").strip())
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
 def to_int(value, default=0) -> int:
     try:
         return int(str(value).strip())
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -632,6 +650,14 @@ def build_faceit_text(details: dict, stats_data: Optional[dict]) -> str:
         f"⚡ K/R: {life['kr']}\n"
         f"💥 ADR: {life['adr']}"
     )
+
+
+def get_player_avatar_url(details: Optional[dict]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    avatar = details.get("avatar") or details.get("avatar_url") or ""
+    return str(avatar).strip()
 
 
 def get_player_avatar_url(details: Optional[dict]) -> str:
@@ -1743,7 +1769,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         action, player_id = data.split("|", 1)
-    except Exception:
+    except ValueError:
         await query.edit_message_text("Ошибка callback data.")
         return
 
