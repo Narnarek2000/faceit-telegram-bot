@@ -1902,6 +1902,49 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
 
                 continue
 
+
+            # --- ПРОВЕРКА ПРОПУЩЕННОГО МАТЧА ---  
+            history, _ = get_player_history(player_id, limit=1)
+            new_last_match_id = extract_last_match_id(history)
+            if new_last_match_id and new_last_match_id != last_match_id and not active_match_id:
+
+               recent_data, _ = get_player_recent_stats(player_id, 5)
+               match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
+
+               details, _ = get_player_details(player_id)
+
+               elo_after = safe_get(
+                   get_cs2_data(details),
+                   "faceit_elo",
+                   elo_before
+               )
+
+               text = format_match_finished_message(
+                   nickname,
+                   new_last_match_id,
+                   match_stats,
+                   elo_before,
+                   elo_after
+               )
+
+               await context.bot.send_message(
+                   chat_id=chat_id,
+                   text=text[:4000]
+               )
+
+               TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_last_match_id
+               TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
+
+               update_tracked_player_state(
+                   chat_id,
+                   player_id,
+                   last_match_id=new_last_match_id,
+                   last_known_elo=str(elo_after)
+               )
+
+               continue
+
+            
             # --- ПРОВЕРКА ЗАКОНЧИЛСЯ ЛИ МАТЧ ---
             if active_match_id:
 
