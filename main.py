@@ -1906,7 +1906,7 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
                 text=text[:4000]
             )
 
-            continue
+            
 
 
         history, history_error = get_player_history(player_id, limit=1)
