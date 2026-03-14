@@ -2049,7 +2049,7 @@ def main():
     app.add_handler(CommandHandler("cleartrack", cleartrack_command))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    app.job_queue.run_repeating(track_matches_job, interval=45, first=10)
+    app.job_queue.run_repeating(track_matches_job, interval=20, first=10)
 
     print("Bot started...")
     app.run_polling()
