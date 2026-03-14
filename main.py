@@ -660,6 +660,14 @@ def get_player_avatar_url(details: Optional[dict]) -> str:
     return str(avatar).strip()
 
 
+def get_player_avatar_url(details: Optional[dict]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    avatar = details.get("avatar") or details.get("avatar_url") or ""
+    return str(avatar).strip()
+
+
 def build_elo_text(details: dict) -> str:
     nickname = safe_get(details, "nickname")
     cs2 = get_cs2_data(details)
