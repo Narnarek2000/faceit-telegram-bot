@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import time
 from collections import defaultdict
 from typing import Optional, Dict, Tuple, List
 
@@ -16,12 +17,14 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TG_BOT_TOKEN = "8692329888:AAGh-uUzW9z4HHVoVnenhRiXjM9aiAIL2s0"
-FACEIT_API_KEY = "6dc92495-d0e2-45f1-a658-d52b02229bfb"
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+FACEIT_API_KEY = os.getenv("FACEIT_API_KEY", "")
 
 BASE_URL = "https://open.faceit.com/data/v4"
 REQUEST_TIMEOUT = 20
-DB_PATH = "/data/faceit_bot.db"
+FACEIT_MAX_RETRIES = 3
+FACEIT_RETRY_DELAY_SEC = 0.6
+DB_PATH = os.getenv("DB_PATH", "/data/faceit_bot.db")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -44,6 +47,9 @@ TRACKED_PLAYERS: Dict[int, Dict[str, Dict[str, str]]] = {}
 # DATABASE
 # =========================
 def get_db_connection():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 
@@ -247,19 +253,34 @@ def faceit_request(path: str, params: Optional[dict] = None) -> Tuple[Optional[d
         "Accept": "application/json",
     }
 
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+    last_error = "Unknown FACEIT error"
 
-        if r.status_code != 200:
+    for attempt in range(1, FACEIT_MAX_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+
+            if r.status_code == 200:
+                if "application/json" not in r.headers.get("content-type", "").lower():
+                    return None, f"Non-JSON response: {r.text[:300]}"
+                return r.json(), None
+
+            # Ретраим только временные ошибки API
+            if r.status_code in (429, 500, 502, 503, 504):
+                last_error = f"FACEIT transient error {r.status_code}: {r.text[:300]}"
+                logger.warning("FACEIT request failed (attempt %s/%s): %s %s", attempt, FACEIT_MAX_RETRIES, path, last_error)
+                if attempt < FACEIT_MAX_RETRIES:
+                    time.sleep(FACEIT_RETRY_DELAY_SEC * attempt)
+                continue
+
             return None, f"FACEIT error {r.status_code}: {r.text[:300]}"
 
-        if "application/json" not in r.headers.get("content-type", "").lower():
-            return None, f"Non-JSON response: {r.text[:300]}"
+        except requests.RequestException as e:
+            last_error = f"Request error: {e}"
+            logger.warning("FACEIT request exception (attempt %s/%s): %s %s", attempt, FACEIT_MAX_RETRIES, path, e)
+            if attempt < FACEIT_MAX_RETRIES:
+                time.sleep(FACEIT_RETRY_DELAY_SEC * attempt)
 
-        return r.json(), None
-
-    except requests.RequestException as e:
-        return None, f"Request error: {e}"
+    return None, last_error
 
 
 def search_player(nickname: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -354,14 +375,14 @@ def format_percent(value) -> str:
 def to_float(value, default=0.0) -> float:
     try:
         return float(str(value).replace("%", "").strip())
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
 def to_int(value, default=0) -> int:
     try:
         return int(str(value).strip())
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -537,12 +558,13 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
         return None, None, None
 
     recent, recent_error = get_player_recent_stats(player_id, limit=5)
-    if recent_error:
-        return None, None, recent_error
 
-    match_stats = find_match_stats_in_recent(recent, last_match_id)
-    if match_stats:
-        return None, None, None
+    # Если матч уже попал в recent stats — считаем его завершённым.
+    # Если recent временно недоступен, продолжаем проверку через статус матча.
+    if not recent_error:
+        match_stats = find_match_stats_in_recent(recent, last_match_id)
+        if match_stats:
+            return None, None, None
 
     match_details, match_error = get_match_details(last_match_id)
     if match_error:
@@ -628,6 +650,14 @@ def build_faceit_text(details: dict, stats_data: Optional[dict]) -> str:
         f"⚡ K/R: {life['kr']}\n"
         f"💥 ADR: {life['adr']}"
     )
+
+
+def get_player_avatar_url(details: Optional[dict]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    avatar = details.get("avatar") or details.get("avatar_url") or ""
+    return str(avatar).strip()
 
 
 def build_elo_text(details: dict) -> str:
@@ -1023,7 +1053,22 @@ async def faceit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = build_faceit_text(player_data["details"], player_data["stats"])
-    await msg.edit_text(text, reply_markup=build_player_keyboard(player_data["player_id"]))
+    reply_markup = build_player_keyboard(player_data["player_id"])
+    avatar_url = get_player_avatar_url(player_data["details"])
+
+    if avatar_url:
+        try:
+            await msg.delete()
+            await update.message.reply_photo(
+                photo=avatar_url,
+                caption=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception as e:
+            logger.warning("Failed to send avatar photo for profile: %s", e)
+
+    await msg.edit_text(text, reply_markup=reply_markup)
 
 
 async def last5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1716,7 +1761,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         action, player_id = data.split("|", 1)
-    except Exception:
+    except ValueError:
         await query.edit_message_text("Ошибка callback data.")
         return
 
@@ -1792,6 +1837,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "stats":
         text = build_faceit_text(player_data["details"], player_data["stats"])
+        avatar_url = get_player_avatar_url(player_data["details"])
+
+        if avatar_url:
+            try:
+                await query.message.delete()
+                await query.message.chat.send_photo(
+                    photo=avatar_url,
+                    caption=text,
+                    reply_markup=build_player_keyboard(player_id),
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to send avatar photo for stats callback: %s", e)
+
+        if query.message.photo:
+            await query.message.delete()
+            await query.message.chat.send_message(
+                text=text,
+                reply_markup=build_player_keyboard(player_id),
+            )
+            return
+
     elif action == "form5":
         text = build_form5_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     elif action == "last5":
@@ -1802,6 +1869,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = build_maps30_text(player_data["details"], player_data["recent"], player_data["recent_error"])
     else:
         text = "Неизвестная кнопка."
+
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.chat.send_message(
+            text=text[:4000],
+            reply_markup=build_player_keyboard(player_id),
+        )
+        return
 
     await query.edit_message_text(text, reply_markup=build_player_keyboard(player_id))
 async def tracklive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1873,135 +1948,96 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             last_match_id = data.get("last_match_id", "")
             elo_before = data.get("last_known_elo", "")
 
-           # --- ПРОВЕРКА НАЧАЛСЯ ЛИ НОВЫЙ МАТЧ ---
-            history, _err = get_player_history(player_id, limit=1)
-            new_match_id = extract_last_match_id(history)
+            current_live_match_id, current_live_match_details, live_error = get_live_match_info(player_id)
+            if live_error:
+                continue
 
-            if new_match_id and new_match_id != last_match_id and not active_match_id:
+            # --- Старт нового матча ---
+            # Условия старта:
+            # 1) сейчас есть live матч
+            # 2) этот матч отличается от сохранённого active_match_id
+            if current_live_match_id and current_live_match_id != active_match_id:
+                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = current_live_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = current_live_match_id
 
-               match_details, _ = get_match_details(new_match_id)
-               status = safe_get(match_details, "status")
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=current_live_match_id,
+                    active_match_id=current_live_match_id,
+                )
 
-               if status != "FINISHED":
+                text = format_match_found_message(
+                    nickname,
+                    current_live_match_id,
+                    current_live_match_details,
+                )
 
-                   TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = new_match_id
-                   TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_match_id
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
+                continue
 
-                   active_match_id = new_match_id
+            # --- Финиш активного матча ---
+            # Если был active матч, а live больше нет — матч завершился.
+            if active_match_id and not current_live_match_id:
+                recent_data, _ = get_player_recent_stats(player_id, 10)
+                match_stats = find_match_stats_in_recent(recent_data, active_match_id)
 
-                   update_tracked_player_state(
-                       chat_id,
-                       player_id,
-                       active_match_id=new_match_id
-                   )
+                details, _ = get_player_details(player_id)
+                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
 
-                   text = format_match_found_message(
-                       nickname,
-                       new_match_id,
-                       match_details
-                   )
+                text = format_match_finished_message(
+                    nickname,
+                    active_match_id,
+                    match_stats,
+                    elo_before,
+                    elo_after,
+                )
 
-                   await context.bot.send_message(
-                       chat_id=chat_id,
-                       text=text[:4000]
-                   )
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
 
-                   continue
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
+                TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
 
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=active_match_id,
+                    active_match_id="",
+                    last_known_elo=str(elo_after),
+                )
+                continue
 
-            # --- ПРОВЕРКА ПРОПУЩЕННОГО МАТЧА ---  
-            history, _err = get_player_history(player_id, limit=1)
-            
-            new_last_match_id = extract_last_match_id(history)
-            if new_last_match_id and new_last_match_id != last_match_id and not active_match_id:
+            # --- Пропущенный завершённый матч (без live-уведомления) ---
+            history, _ = get_player_history(player_id, limit=1)
+            newest_match_id = extract_last_match_id(history)
 
-               recent_data, _ = get_player_recent_stats(player_id, 5)
-               match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
-               if not match_stats:
-                   recent_data, _ = get_player_recent_stats(player_id, 10)
-                   match_stats = find_match_stats_in_recent(recent_data, new_last_match_id)
+            if newest_match_id and newest_match_id != last_match_id and not active_match_id:
+                recent_data, _ = get_player_recent_stats(player_id, 10)
+                match_stats = find_match_stats_in_recent(recent_data, newest_match_id)
 
-               details, _ = get_player_details(player_id)
+                details, _ = get_player_details(player_id)
+                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
 
-               elo_after = safe_get(
-                   get_cs2_data(details),
-                   "faceit_elo",
-                   elo_before
-               )
+                text = format_match_finished_message(
+                    nickname,
+                    newest_match_id,
+                    match_stats,
+                    elo_before,
+                    elo_after,
+                )
 
-               text = format_match_finished_message(
-                   nickname,
-                   new_last_match_id,
-                   match_stats,
-                   elo_before,
-                   elo_after
-               )
+                await context.bot.send_message(chat_id=chat_id, text=text[:4000])
 
-               await context.bot.send_message(
-                   chat_id=chat_id,
-                   text=text[:4000]
-               )
+                TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = newest_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
 
-               TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = new_last_match_id
-               TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
-
-               update_tracked_player_state(
-                   chat_id,
-                   player_id,
-                   last_match_id=new_last_match_id,
-                   last_known_elo=str(elo_after)
-               )
-
-               continue
-
-            
-            # --- ПРОВЕРКА ЗАКОНЧИЛСЯ ЛИ МАТЧ ---
-            if active_match_id:
-
-                match_details, _ = get_match_details(active_match_id)
-                status = safe_get(match_details, "status")
-
-                if status == "FINISHED":
-
-                    recent_data, _ = get_player_recent_stats(player_id, 5)
-
-                    match_stats = find_match_stats_in_recent(
-                        recent_data,
-                        active_match_id
-                    )
-
-                    details, _ = get_player_details(player_id)
-
-                    elo_after = safe_get(
-                        get_cs2_data(details),
-                        "faceit_elo",
-                        elo_before
-                    )
-
-                    text = format_match_finished_message(
-                        nickname,
-                        active_match_id,
-                        match_stats,
-                        elo_before,
-                        elo_after
-                    )
-
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=text[:4000]
-                    )
-
-                    TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
-                    TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
-                    TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
-
-                    update_tracked_player_state(
-                        chat_id,
-                        player_id,
-                        last_match_id=active_match_id,
-                        active_match_id="",
-                        last_known_elo=str(elo_after)
-                    )
+                update_tracked_player_state(
+                    chat_id,
+                    player_id,
+                    last_match_id=newest_match_id,
+                    last_known_elo=str(elo_after),
+                )
 # =========================
 # MAIN
 # =========================
