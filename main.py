@@ -692,8 +692,18 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
         return None, None, None
 
     match_details, match_error = get_match_details(last_match_id)
-    if match_error:
-        return last_match_id, None, match_error
+    if match_error or not match_details:
+        # Иногда endpoint /matches/{id} даёт временную ошибку именно в начале игры.
+        # В таком случае не пропускаем старт: если матч ещё не попал в recent stats,
+        # считаем его live и отправляем уведомление без деталей лобби.
+        recent_data, recent_error = get_player_recent_stats(player_id, 5)
+        if recent_error:
+            return last_match_id, None, None
+
+        if find_match_stats_in_recent(recent_data, last_match_id):
+            return None, None, None
+
+        return last_match_id, None, None
 
     status = safe_get(match_details, "status")
 
