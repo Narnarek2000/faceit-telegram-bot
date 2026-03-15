@@ -369,6 +369,15 @@ def parse_result(value) -> str:
     return str(value)
 
 
+def normalize_match_status(status) -> str:
+    return str(status or "").strip().upper()
+
+
+def is_match_finished(status) -> bool:
+    normalized = normalize_match_status(status)
+    return normalized in {"FINISHED", "CANCELLED", "CANCELED", "ABORTED"}
+
+
 def format_percent(value) -> str:
     if value in (None, "", "N/A"):
         return "N/A"
@@ -486,14 +495,29 @@ def parse_recent_match(item: dict) -> str:
     )
 
 
+def normalize_match_id(match_id) -> str:
+    return str(match_id or "").strip().lower()
+
+
 def find_match_stats_in_recent(recent_data: Optional[dict], match_id: str) -> Optional[dict]:
     if not isinstance(recent_data, dict):
         return None
 
+    target_match_id = normalize_match_id(match_id)
     items = recent_data.get("items", [])
     for item in items:
-        current_match_id = item.get("match_id") or item.get("id")
-        if current_match_id == match_id:
+        if not isinstance(item, dict):
+            continue
+
+        current_match_id = (
+            item.get("match_id")
+            or item.get("matchId")
+            or item.get("id")
+            or item.get("game_id")
+            or item.get("gameId")
+        )
+
+        if normalize_match_id(current_match_id) == target_match_id:
             return item
     return None
 
@@ -513,7 +537,11 @@ def extract_player_match_stats(match_stats_data: Optional[dict], player_id: str,
             continue
 
         teams = round_item.get("teams", {})
-        if not isinstance(teams, dict):
+        if isinstance(teams, dict):
+            teams_iter = teams.values()
+        elif isinstance(teams, list):
+            teams_iter = teams
+        else:
             continue
 
         round_stats = round_item.get("round_stats", {})
@@ -528,11 +556,11 @@ def extract_player_match_stats(match_stats_data: Optional[dict], player_id: str,
             or "N/A"
         )
 
-        for team_data in teams.values():
+        for team_data in teams_iter:
             if not isinstance(team_data, dict):
                 continue
 
-            players = team_data.get("players", [])
+            players = team_data.get("players") or team_data.get("roster") or []
             if not isinstance(players, list):
                 continue
 
@@ -540,11 +568,21 @@ def extract_player_match_stats(match_stats_data: Optional[dict], player_id: str,
                 if not isinstance(player, dict):
                     continue
 
-                current_player_id = player.get("player_id") or player.get("id")
-                current_nick = str(player.get("nickname", "")).strip().lower()
+                current_player_id = (
+                    player.get("player_id")
+                    or player.get("playerId")
+                    or player.get("id")
+                    or player.get("guid")
+                )
+                current_nick = str(
+                    player.get("nickname")
+                    or player.get("nick")
+                    or player.get("player_nickname")
+                    or ""
+                ).strip().lower()
 
                 is_target = False
-                if player_id and current_player_id == player_id:
+                if player_id and normalize_match_id(current_player_id) == normalize_match_id(player_id):
                     is_target = True
                 elif nickname_lower and current_nick == nickname_lower:
                     is_target = True
@@ -552,7 +590,12 @@ def extract_player_match_stats(match_stats_data: Optional[dict], player_id: str,
                 if not is_target:
                     continue
 
-                player_stats = player.get("player_stats", {})
+                player_stats = (
+                    player.get("player_stats")
+                    or player.get("playerStats")
+                    or player.get("stats")
+                    or {}
+                )
                 if not isinstance(player_stats, dict):
                     player_stats = {}
 
@@ -656,10 +699,27 @@ def get_live_match_info(player_id: str) -> Tuple[Optional[str], Optional[dict], 
 
     # У FACEIT матч может появляться в recent stats ещё до статуса FINISHED,
     # поэтому источник истины для "live" — именно статус матча.
-    if status == "FINISHED":
+    if is_match_finished(status):
         return None, None, None
 
     return last_match_id, match_details, None
+
+
+def get_player_elo(player_id: str, fallback_elo: str = "") -> str:
+    details, details_error = get_player_details(player_id)
+    if details_error or not details:
+        return fallback_elo
+    return safe_get(get_cs2_data(details), "faceit_elo", fallback_elo)
+
+
+def resolve_match_stats_for_player(player_id: str, nickname: str, match_id: str) -> Optional[dict]:
+    recent_data, _ = get_player_recent_stats(player_id, 30)
+    match_stats = find_match_stats_in_recent(recent_data, match_id)
+    if match_stats:
+        return match_stats
+
+    match_stats_data, _ = get_match_stats(match_id)
+    return extract_player_match_stats(match_stats_data, player_id, nickname)
 
 
 def build_match_lobby_text(match_details: Optional[dict]) -> str:
@@ -1585,7 +1645,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not match_stats:
             match_details, _ = get_match_details(last_match_id)
             status = safe_get(match_details, "status")
-            if status != "FINISHED":
+            if not is_match_finished(status):
                 active_match_id = last_match_id
 
     if chat_id not in TRACKED_PLAYERS:
@@ -1596,6 +1656,7 @@ async def trackfull_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "last_match_id": last_match_id,
         "active_match_id": active_match_id,
         "last_known_elo": str(current_elo),
+        "finish_checks": 0,
     }
 
     save_tracked_player(
@@ -1891,7 +1952,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not match_stats:
                 match_details, _ = get_match_details(last_match_id)
                 status = safe_get(match_details, "status")
-                if status != "FINISHED":
+                if not is_match_finished(status):
                     active_match_id = last_match_id
 
         if chat_id not in TRACKED_PLAYERS:
@@ -1902,6 +1963,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_match_id": last_match_id or "",
             "active_match_id": active_match_id,
             "last_known_elo": str(current_elo),
+            "finish_checks": 0,
         }
 
         save_tracked_player(
@@ -2054,6 +2116,7 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             if current_live_match_id and current_live_match_id != active_match_id:
                 TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = current_live_match_id
                 TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = current_live_match_id
+                TRACKED_PLAYERS[chat_id][player_id]["finish_checks"] = 0
 
                 update_tracked_player_state(
                     chat_id,
@@ -2074,14 +2137,14 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             # --- Финиш активного матча ---
             # Если был active матч, а live больше нет — матч завершился.
             if active_match_id and not current_live_match_id:
-                recent_data, _ = get_player_recent_stats(player_id, 10)
-                match_stats = find_match_stats_in_recent(recent_data, active_match_id)
-                if not match_stats:
-                    match_stats_data, _ = get_match_stats(active_match_id)
-                    match_stats = extract_player_match_stats(match_stats_data, player_id, nickname)
+                finish_checks = to_int(data.get("finish_checks", 0), 0)
+                match_stats = resolve_match_stats_for_player(player_id, nickname, active_match_id)
 
-                details, _ = get_player_details(player_id)
-                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
+                if not match_stats and finish_checks < 3:
+                    TRACKED_PLAYERS[chat_id][player_id]["finish_checks"] = finish_checks + 1
+                    continue
+
+                elo_after = get_player_elo(player_id, elo_before)
 
                 text = format_match_finished_message(
                     nickname,
@@ -2096,6 +2159,7 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
                 TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = active_match_id
                 TRACKED_PLAYERS[chat_id][player_id]["active_match_id"] = ""
                 TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
+                TRACKED_PLAYERS[chat_id][player_id]["finish_checks"] = 0
 
                 update_tracked_player_state(
                     chat_id,
@@ -2111,14 +2175,8 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
             newest_match_id = extract_last_match_id(history)
 
             if newest_match_id and newest_match_id != last_match_id and not active_match_id:
-                recent_data, _ = get_player_recent_stats(player_id, 10)
-                match_stats = find_match_stats_in_recent(recent_data, newest_match_id)
-                if not match_stats:
-                    match_stats_data, _ = get_match_stats(newest_match_id)
-                    match_stats = extract_player_match_stats(match_stats_data, player_id, nickname)
-
-                details, _ = get_player_details(player_id)
-                elo_after = safe_get(get_cs2_data(details), "faceit_elo", elo_before)
+                match_stats = resolve_match_stats_for_player(player_id, nickname, newest_match_id)
+                elo_after = get_player_elo(player_id, elo_before)
 
                 text = format_match_finished_message(
                     nickname,
@@ -2132,6 +2190,7 @@ async def track_matches_job(context: ContextTypes.DEFAULT_TYPE):
 
                 TRACKED_PLAYERS[chat_id][player_id]["last_match_id"] = newest_match_id
                 TRACKED_PLAYERS[chat_id][player_id]["last_known_elo"] = str(elo_after)
+                TRACKED_PLAYERS[chat_id][player_id]["finish_checks"] = 0
 
                 update_tracked_player_state(
                     chat_id,
